@@ -42,6 +42,7 @@ public class MiniJPAHibernate {
     @Target(ElementType.FIELD)
     @interface ManyToOne {
         FetchType fetch() default FetchType.EAGER;
+        Class<?> targetEntity() default void.class;
     }
     
     @Retention(RetentionPolicy.RUNTIME)
@@ -96,8 +97,11 @@ public class MiniJPAHibernate {
                 
                 if (field.isAnnotationPresent(ManyToOne.class)) {
                     RelationshipInfo rel = new RelationshipInfo();
-                    rel.fetchType = field.getAnnotation(ManyToOne.class).fetch();
-                    rel.targetEntity = field.getType();
+                    ManyToOne manyToOne = field.getAnnotation(ManyToOne.class);
+                    rel.fetchType = manyToOne.fetch();
+                    // Use targetEntity if specified, otherwise infer from field type
+                    rel.targetEntity = manyToOne.targetEntity() != void.class ? 
+                        manyToOne.targetEntity() : field.getType();
                     meta.relationships.put(field, rel);
                 } else if (field.isAnnotationPresent(OneToMany.class)) {
                     RelationshipInfo rel = new RelationshipInfo();
@@ -366,7 +370,7 @@ public class MiniJPAHibernate {
                         
                         if (fkValue != null) {
                             if (rel.fetchType == FetchType.LAZY) {
-                                // Create lazy wrapper
+                                // Create lazy wrapper with the actual target entity class
                                 LazyLoadingWrapper<?> wrapper = new LazyLoadingWrapper<>(
                                     rel.targetEntity, fkValue, this);
                                 field.set(entity, wrapper);
@@ -535,7 +539,7 @@ public class MiniJPAHibernate {
         private String title;
         private String content;
         
-        @ManyToOne(fetch = FetchType.LAZY)
+        @ManyToOne(fetch = FetchType.LAZY, targetEntity = User.class)
         private Object author; // Can be User or LazyLoadingWrapper<User>
         
         public Post() {}
