@@ -36,15 +36,17 @@ Implements the "identity map" pattern:
 - Tracks entity state (new, managed, dirty)
 - Prevents redundant database queries
 
-### 3. **Lazy Loading with Dynamic Proxies**
-Creates proxy objects that load data on first access:
+### 3. **Lazy Loading with Wrappers**
+Creates wrapper objects that load data on first access:
 ```java
 Post post = em.find(Post.class, 1L);
-// Author is a proxy - NOT loaded yet
+// Author is a wrapper - NOT loaded yet
 User author = post.getAuthor();
 // NOW it loads from database when accessed
 String name = author.getUsername();
 ```
+
+**Note**: Real Hibernate uses bytecode manipulation (Javassist/ByteBuddy) to create actual subclasses of your entities. We use a simple wrapper for demonstration purposes since Java's dynamic proxies only work with interfaces.
 
 ### 4. **Automatic Dirty Checking**
 Tracks changes to managed entities:
@@ -185,7 +187,7 @@ Loading post...
   [SQL] SELECT * FROM posts WHERE id = ?
   [PersistenceContext] Cached: Post#1
 Post loaded: Post{id=1, title='My First Post'}
-Author is a proxy: true
+Author is lazy wrapper: true
 
 Now accessing author...
     [LazyProxy] Loading User#1
@@ -214,7 +216,7 @@ By reading this code, you'll understand:
 | `EntityMetadata` | `EntityPersister` / `EntityMetamodel` | Stores metadata about entity classes |
 | `PersistenceContext` | `PersistenceContext` / `StatefulPersistenceContext` | First-level cache, tracks entity state |
 | `EntityManager` | `EntityManager` / `SessionImpl` | Main API for CRUD operations |
-| `LazyLoadingProxy` | `LazyInitializer` / `javassist` proxies | Defers loading until accessed |
+| `LazyLoadingWrapper` | `LazyInitializer` / `javassist` proxies | Defers loading until accessed |
 | `@Entity` | `@Entity` | Marks a class as a database entity |
 | `@Id` | `@Id` | Marks the primary key field |
 | `@ManyToOne` | `@ManyToOne` | Defines a many-to-one relationship |
@@ -236,10 +238,12 @@ assert user1 == user2; // Same object!
 
 ### Lazy Loading
 
-Relationships marked as `LAZY` create proxy objects:
-- Proxy looks like the real object
-- Database query deferred until first access
+Relationships marked as `LAZY` create wrapper objects:
+- Wrapper defers database query until first access
 - Allows loading only what you need
+- In real Hibernate, uses bytecode manipulation to create actual subclasses
+
+**Note**: This demo uses a simple wrapper class. Real Hibernate uses libraries like Javassist or ByteBuddy to create actual proxy subclasses of your entities at runtime, which is more transparent but requires bytecode manipulation.
 
 **Beware**: Accessing lazy relationships outside a transaction causes `LazyInitializationException`!
 

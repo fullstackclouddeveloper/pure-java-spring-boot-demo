@@ -1,5 +1,6 @@
 ///usr/bin/env jbang "$0" "$@" ; exit $?
 //JAVA 17+
+//DEPS com.h2database:h2:2.2.224
 
 import java.lang.annotation.*;
 import java.lang.reflect.*;
@@ -190,42 +191,38 @@ public class MiniJPAHibernate {
 
     // ============== LAZY LOADING PROXY (creates proxies for lazy relationships) ==============
     
-    static class LazyLoadingProxy implements InvocationHandler {
-        private Object realObject;
-        private final Class<?> entityClass;
+    /**
+     * Simplified lazy loading wrapper. In real Hibernate, this uses bytecode manipulation
+     * (Javassist/ByteBuddy) to create subclasses. We use a wrapper for simplicity.
+     */
+    static class LazyLoadingWrapper<T> {
+        private T realObject;
+        private final Class<T> entityClass;
         private final Object id;
         private final EntityManager entityManager;
         private boolean initialized = false;
         
-        LazyLoadingProxy(Class<?> entityClass, Object id, EntityManager em) {
+        LazyLoadingWrapper(Class<T> entityClass, Object id, EntityManager em) {
             this.entityClass = entityClass;
             this.id = id;
             this.entityManager = em;
         }
         
-        @Override
-        public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
-            // Initialize on first access (except getId)
-            if (!initialized && !method.getName().equals("getId")) {
+        T get() {
+            if (!initialized) {
                 System.out.println("    [LazyProxy] Loading " + entityClass.getSimpleName() + "#" + id);
                 realObject = entityManager.find(entityClass, id);
                 initialized = true;
             }
-            
-            // Handle getId() without initializing
-            if (method.getName().equals("getId") && !initialized) {
-                return id;
-            }
-            
-            return method.invoke(realObject, args);
+            return realObject;
         }
         
-        static <T> T createProxy(Class<T> entityClass, Object id, EntityManager em) {
-            return (T) Proxy.newProxyInstance(
-                entityClass.getClassLoader(),
-                new Class<?>[] { entityClass },
-                new LazyLoadingProxy(entityClass, id, em)
-            );
+        Object getId() {
+            return id;
+        }
+        
+        boolean isInitialized() {
+            return initialized;
         }
     }
 
@@ -369,10 +366,10 @@ public class MiniJPAHibernate {
                         
                         if (fkValue != null) {
                             if (rel.fetchType == FetchType.LAZY) {
-                                // Create lazy proxy
-                                Object proxy = LazyLoadingProxy.createProxy(
+                                // Create lazy wrapper
+                                LazyLoadingWrapper<?> wrapper = new LazyLoadingWrapper<>(
                                     rel.targetEntity, fkValue, this);
-                                field.set(entity, proxy);
+                                field.set(entity, wrapper);
                             } else {
                                 // Eager fetch
                                 Object related = find(rel.targetEntity, fkValue);
@@ -402,6 +399,30 @@ public class MiniJPAHibernate {
                     }
                     columnNames.add(meta.getColumnName(field));
                     values.add(field.get(entity));
+                }
+                
+                // Handle ManyToOne relationships - add foreign key
+                for (Map.Entry<Field, EntityMetadata.RelationshipInfo> entry : meta.relationships.entrySet()) {
+                    Field field = entry.getKey();
+                    if (field.isAnnotationPresent(ManyToOne.class)) {
+                        Object fieldValue = field.get(entity);
+                        Object fkValue = null;
+                        
+                        // Handle both direct entity and lazy wrapper
+                        if (fieldValue instanceof LazyLoadingWrapper) {
+                            fkValue = ((LazyLoadingWrapper<?>) fieldValue).getId();
+                        } else if (fieldValue != null) {
+                            // Direct entity - get its ID
+                            Class<?> fieldClass = fieldValue.getClass();
+                            EntityMetadata relatedMeta = getMetadata(fieldClass);
+                            fkValue = relatedMeta.idField.get(fieldValue);
+                        }
+                        
+                        if (fkValue != null) {
+                            columnNames.add(field.getName() + "_id");
+                            values.add(fkValue);
+                        }
+                    }
                 }
                 
                 String sql = "INSERT INTO " + meta.tableName + " (" + 
@@ -515,7 +536,7 @@ public class MiniJPAHibernate {
         private String content;
         
         @ManyToOne(fetch = FetchType.LAZY)
-        private User author;
+        private Object author; // Can be User or LazyLoadingWrapper<User>
         
         public Post() {}
         
@@ -530,8 +551,24 @@ public class MiniJPAHibernate {
         public void setTitle(String title) { this.title = title; }
         public String getContent() { return content; }
         public void setContent(String content) { this.content = content; }
-        public User getAuthor() { return author; }
-        public void setAuthor(User author) { this.author = author; }
+        
+        // Convenience methods that handle both User and LazyLoadingWrapper
+        public User getAuthor() { 
+            if (author instanceof LazyLoadingWrapper) {
+                return ((LazyLoadingWrapper<User>) author).get();
+            }
+            return (User) author;
+        }
+        
+        public void setAuthor(User author) { 
+            this.author = author;
+        }
+        
+        // For checking if lazy
+        boolean isAuthorLazy() {
+            return author instanceof LazyLoadingWrapper && 
+                   !((LazyLoadingWrapper<?>) author).isInitialized();
+        }
         
         @Override
         public String toString() {
@@ -624,7 +661,7 @@ public class MiniJPAHibernate {
     
     private static void demo3_LazyLoading(EntityManager em) throws Exception {
         System.out.println("\n" + "=".repeat(80));
-        System.out.println("DEMO 3: Lazy Loading with Dynamic Proxies");
+        System.out.println("DEMO 3: Lazy Loading");
         System.out.println("=".repeat(80) + "\n");
         
         em.beginTransaction();
@@ -632,7 +669,7 @@ public class MiniJPAHibernate {
         // Create post with author
         User author = em.find(User.class, 1L);
         Post post = new Post("My First Post", "Hello World!");
-        post.setAuthor(author);
+        post.setAuthor(author); // Set directly as User
         em.persist(post);
         em.commit();
         
@@ -645,11 +682,12 @@ public class MiniJPAHibernate {
         System.out.println("\nLoading post...");
         Post loadedPost = em.find(Post.class, 1L);
         System.out.println("Post loaded: " + loadedPost);
-        System.out.println("Author is a proxy: " + Proxy.isProxyClass(loadedPost.getAuthor().getClass()));
+        System.out.println("Author is lazy: " + loadedPost.isAuthorLazy());
         
         // Accessing author triggers lazy load
         System.out.println("\nNow accessing author...");
         System.out.println("Author: " + loadedPost.getAuthor().getUsername());
+        System.out.println("Author is lazy: " + loadedPost.isAuthorLazy());
         
         em.commit();
     }
